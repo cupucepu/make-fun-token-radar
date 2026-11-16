@@ -142,10 +142,39 @@ export const CALIBRATION_MIN_N = 30;
  * 567x off the pooled line), so the category uses the pooled intercept. */
 export const LEVEL_MIN_N = 10;
 
-/** Shrinkage toward the pooled intercept: a_eff = A + (n/(n+k)) x (a_cat - A). With
- * k=20 a 15-row category keeps 43% of its deviation, an 11-row one 35%: the level is
- * a nudge, never a rebuild. */
-export const LEVEL_SHRINK_K = 20;
+/**
+ * The pooled evidence a category's own level is diluted with. Read it as a count
+ * of imaginary pooled rows standing beside the category's real ones: a category
+ * with n live rows keeps n / (n + POOLED_PRIOR_COUNT) of the gap between its own
+ * intercept and the pooled one, and the rest of the gap is closed toward pooled.
+ * Twenty is a strong dilution: even a 15-row category keeps under half of its
+ * deviation. That is the intent -- a level is a small correction to the shared
+ * fit, not a second fit per category. The slope is shared by every row; the level
+ * touches the intercept alone, and only for categories with enough live rows.
+ */
+export const POOLED_PRIOR_COUNT = 20;
+
+/**
+ * A category's intercept after dilution: the pooled intercept plus the fraction
+ * of the category's own deviation that survives. The fraction grows with n, so a
+ * bigger category speaks louder, but it never reaches one, so no category fully
+ * escapes the pooled line. This is the single place the shrink happens;
+ * fitCalibration calls it and nothing else computes a level.
+ */
+function shrunkIntercept(pooledA: number, categoryA: number, n: number): number {
+  return pooledA + (n / (n + POOLED_PRIOR_COUNT)) * (categoryA - pooledA);
+}
+
+/**
+ * The multiplier a shrunk intercept puts on the base: ten to the power of the
+ * shrunk intercept minus the pooled one. Below pooled the multiplier sits under
+ * one and pulls the base down; above pooled it sits over one and lifts the base.
+ * It is the ratio between the category's base and the pooled base at the same
+ * TVL, so it says exactly how much the level moves the base, up or down.
+ */
+function levelMultiplier(shrunkA: number, pooledA: number): number {
+  return Math.pow(10, shrunkA - pooledA);
+}
 
 /** One category's base level: the raw per-category intercept at the pooled slope
  * (a_cat), the shrunk intercept actually used (a_eff), and the multiplier on the base
@@ -168,7 +197,7 @@ export interface CategoryLevel {
  * scatter; `excluded_points` are the live tokens the alignment leaves out (34 of them),
  * drawn grey and hollow beside the aligned sample. `levels` are the per-category base
  * levels: only categories with at least LEVEL_MIN_N live rows in the aligned sample
- * earn one, shrunk toward the pooled intercept with LEVEL_SHRINK_K, and the SLOPE stays
+ * earn one, diluted toward the pooled intercept by POOLED_PRIOR_COUNT, and the SLOPE stays
  * pooled for every row -- so a level is a small intercept shift, never a new fit. On
  * failure `status` is 'failed', `reason` names why, and every coefficient is null: there
  * is no fallback base and no invented number. */
@@ -298,8 +327,8 @@ export function fitCalibration(snapshot: Snapshot): Calibration {
     const e = catSums.get(key)!;
     if (e.n < LEVEL_MIN_N) continue;
     const aCat = e.sum / e.n;
-    const aEff = fit.a + (e.n / (e.n + LEVEL_SHRINK_K)) * (aCat - fit.a);
-    const level = Math.pow(10, aEff - fit.a);
+    const aEff = shrunkIntercept(fit.a, aCat, e.n);
+    const level = levelMultiplier(aEff, fit.a);
     if (!Number.isFinite(aCat) || !Number.isFinite(aEff) || !Number.isFinite(level) || level <= 0) {
       return failedCalibration(`category level for ${key === '' ? '(null category)' : key} failed validation`, fullOut);
     }
