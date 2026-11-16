@@ -176,6 +176,26 @@ function levelMultiplier(shrunkA: number, pooledA: number): number {
   return Math.pow(10, shrunkA - pooledA);
 }
 
+/** The smallest implied value a board row may carry: one whole dollar. The base
+ * is rounded to whole dollars before the multipliers apply, and the implied value
+ * is scored from that rounded base, so a row cannot fall below a dollar -- and a
+ * value below it would mean the rounding or the multipliers broke, not that the
+ * protocol is worth less. The gate refuses such a board outright. */
+export const IMPLIED_MIN_USD = 1;
+
+/** The largest implied value a board row may carry: a hundred trillion dollars.
+ * No protocol the board ranks is worth that much, so a value above it means the
+ * power law exploded -- a slope that was never pooled, a level that was never
+ * shrunk -- and the gate refuses the board instead of publishing the number. */
+export const IMPLIED_MAX_USD = 1e14;
+
+/** A farm step's length bounds, in characters: the gate takes a step only between
+ * twenty and six hundred characters. Shorter than twenty is not a step, it is a
+ * fragment; longer than six hundred is a paragraph, not a step. The trim keeps
+ * four characters of headroom so the ellipsis it appends still fits under the cap. */
+export const FARM_STEP_MIN_CHARS = 20;
+export const FARM_STEP_MAX_CHARS = 600;
+
 /** One category's base level: the raw per-category intercept at the pooled slope
  * (a_cat), the shrunk intercept actually used (a_eff), and the multiplier on the base
  * that a_eff implies (level = 10^(a_eff - A)). */
@@ -264,6 +284,18 @@ function olsLog10(pts: Array<{ x: number; y: number }>): { a: number | null; b: 
 }
 
 /**
+ * The intercept one live token implies at the pooled slope: its log market cap
+ * minus the slope times its log TVL. A token exactly on the fitted line implies
+ * the pooled intercept; a token above the line implies a higher one. A category's
+ * intercept is the mean of its tokens' implied intercepts, so this is the single
+ * place the per-token figure is computed -- the accumulation in fitCalibration
+ * calls it and nothing else inlines the arithmetic.
+ */
+function impliedIntercept(tvlUsd: number, mcapUsd: number, slope: number): number {
+  return Math.log10(mcapUsd) - slope * Math.log10(tvlUsd);
+}
+
+/**
  * Fit log10(mcap) = a + b x log10(tvl) on the snapshot's live tokens. Rows are sorted by slug
  * first so the fit is deterministic. A fitted point needs a positive finite market cap, a
  * positive finite TVL, and a reported seven-day change: a market cap of zero carries no log,
@@ -319,7 +351,7 @@ export function fitCalibration(snapshot: Snapshot): Calibration {
     const key = p.category ?? '';
     const e = catSums.get(key) ?? { n: 0, sum: 0 };
     e.n += 1;
-    e.sum += Math.log10(p.mcap_usd as number) - fit.b * Math.log10(p.tvl_usd);
+    e.sum += impliedIntercept(p.tvl_usd, p.mcap_usd as number, fit.b);
     catSums.set(key, e);
   }
   const levels: CategoryLevel[] = [];
@@ -602,7 +634,7 @@ export function impliedValue(
   const catMult = model.cat_floor + catRate * model.cat_range;
   const aEff = effectiveA(protocol.category, calibration.a, calibration.levels);
   const base = Math.round(Math.pow(10, aEff) * Math.pow(protocol.tvl_usd, calibration.b));
-  const implied = Math.max(1, Math.round(base * growthMult * maturityMult * chainMult * catMult));
+  const implied = Math.max(IMPLIED_MIN_USD, Math.round(base * growthMult * maturityMult * chainMult * catMult));
   return { implied, base, aEff, growthPct, growthMult, confidence, tvlPrev, invalidGrowth, maturityMult, chainMult, catMult, catRate, age };
 }
 
@@ -672,8 +704,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
 /** A step as one string: its action, then its cost and time, within the gate's 20..600 characters. */
 export function stepText(step: FarmStep): string {
   let s = `${step.text} Cost: ${step.cost}. Time: ${step.time}.`;
-  if (s.length > 600) s = `${s.slice(0, 596)}...`;
-  if (s.length < 20) s = `${s} Hold the position and check the protocol's own page.`;
+  if (s.length > FARM_STEP_MAX_CHARS) s = `${s.slice(0, FARM_STEP_MAX_CHARS - 4)}...`;
+  if (s.length < FARM_STEP_MIN_CHARS) s = `${s} Hold the position and check the protocol's own page.`;
   return s;
 }
 
@@ -1005,8 +1037,8 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
   for (const r of board) {
     const steps = r.farm_steps;
     if (steps.length < 3 || steps.length > 12) return `${r.slug} has ${steps.length} farm steps`;
-    for (const s of steps) if (s.length < 20 || s.length > 600) return `${r.slug} has a farm step of ${s.length} characters`;
-    if (!Number.isSafeInteger(r.implied_value_usd) || r.implied_value_usd <= 0 || r.implied_value_usd > 1e14) {
+    for (const s of steps) if (s.length < FARM_STEP_MIN_CHARS || s.length > FARM_STEP_MAX_CHARS) return `${r.slug} has a farm step of ${s.length} characters`;
+    if (!Number.isSafeInteger(r.implied_value_usd) || r.implied_value_usd < IMPLIED_MIN_USD || r.implied_value_usd > IMPLIED_MAX_USD) {
       return `${r.slug} has implied value ${r.implied_value_usd}`;
     }
     if (r.name.trim().length === 0) return `${r.slug} has an empty name`;
