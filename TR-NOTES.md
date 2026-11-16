@@ -10,10 +10,10 @@ $1,000; 2nd–5th $50; 6th–10th $25. At most 5 submissions/day, 10 in all.
   excluded categories (Bridge / Canonical Bridge / Liquid Staking / Liquid Restaking /
   Restaked BTC) 86, wrapped/staked/staking words 5, exchange prefixes 0.
 - Rankable total: 198 = 40 watchlist + 138 below the floor + 20 above the floor that
-  the house's watchlist leaves out. Those 20 are mostly sub-products and pools of other
-  protocols (Sentora Curator $2.76B, CIAN Yield Layer, Mellow Core, Circle Gateway);
-  the house's rule also uses `parentProtocol`, which the snapshot's ten fields do not
-  carry, so they are NOT ranked. The brief's "~250–300 rows" estimate was wrong; the
+  the house's watchlist leaves out. Those 20 are described only as not in the sealed
+  watchlist (Sentora Curator $2.76B, CIAN Yield Layer, Mellow Core, Circle Gateway);
+  the snapshot's ten fields do not carry `parentProtocol`, so no parent-token reason
+  can be stated for them, and they are NOT ranked. The brief's "~250–300 rows" estimate was wrong; the
   real board is 178 rows (40 + 138), which still clears the gate's 100-row minimum.
 - Growth range in the rankable set: -72.7% to +4,448.5% (one extreme outlier).
   Change_7d null in 2 pre-token protocols; listed_at null in 7 rankable ones.

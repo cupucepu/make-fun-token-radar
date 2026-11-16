@@ -103,6 +103,20 @@ tbody tr[data-selected="true"] { background: rgba(242, 177, 60, 0.09); }
 .tag.live::before { background: var(--green); }
 .watch { color: var(--amber); font-size: 11px; font-family: var(--font-num); letter-spacing: 0.06em; text-transform: uppercase; }
 
+.warn { display: inline-block; margin-left: var(--s2); padding: 1px var(--s2); border: 1px solid var(--amber); border-radius: 999px; color: var(--amber); font-size: 11px; font-family: var(--font-body); white-space: nowrap; }
+
+.valid { margin-top: var(--s3); padding-top: var(--s3); border-top: 1px solid var(--line); display: grid; gap: var(--s2); }
+.valid canvas { width: 100%; max-width: 520px; height: auto; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); }
+
+.compare { margin-top: var(--s4); padding: var(--s5); display: grid; gap: var(--s3); }
+.compare-picks { display: flex; flex-wrap: wrap; gap: var(--s3); }
+.compare-picks .field select { min-width: 240px; }
+
+.guide { margin-top: var(--s4); padding: var(--s5); display: grid; gap: var(--s3); }
+.guide-steps { margin: 0; padding-left: var(--s5); display: grid; gap: var(--s2); }
+.guide-steps li { padding-left: var(--s1); }
+.guide-steps li::marker { color: var(--amber); }
+
 .model { margin-top: var(--s4); padding: var(--s5); display: grid; gap: var(--s3); }
 .formula { font-family: var(--font-num); font-size: 13px; line-height: 1.8; color: var(--muted); overflow-wrap: anywhere; background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius); padding: var(--s3) var(--s4); }
 .formula b { color: var(--amber); font-weight: 500; }

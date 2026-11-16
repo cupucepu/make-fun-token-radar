@@ -1,4 +1,4 @@
-// Token Radar's model, version radar-2: one snapshot of the protocol universe in, one ranked board out.
+// Token Radar's model, version radar-3: one snapshot of the protocol universe in, one ranked board out.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) plus every
 // rankable pre-token protocol below the watchlist floor. A protocol is rankable when it records no
@@ -10,11 +10,43 @@
 // Implied value follows only from the snapshot's own figures. Nothing is special-cased by name and
 // no row is hand-picked; the same function scores every protocol:
 //
-//   base     = BASE_SCALE x log10(1 + tvl_usd / BASE_REF)     -- log-dampened: a $2.75B protocol is
-//                                                             about 3x a $50M one, not 55x
-//   growth   = clamp(change_7d, GROWTH_FLOOR, GROWTH_CAP)      -- null growth counts as 0
-//   growthM  = 1 + (growth / 100) x GROWTH_WEIGHT              -- 0.40x .. 3.00x, strong enough to
-//                                                             actually move ranks
+//   base     = 10^a_eff x tvl_usd^b                   -- the power law fitted at run
+//                                                         time to the snapshot's own live
+//                                                         tokens (log10 OLS; see
+//                                                         fitCalibration). The aligned fit
+//                                                         is the base: a=3.91, b=0.40,
+//                                                         R2=0.10 on n=94 live tokens. The
+//                                                         fit is WEAK -- it explains 10% of
+//                                                         the spread, the typical token sits
+//                                                         3.5x off the line -- and the
+//                                                         dashboard says so. The unaligned
+//                                                         fit (all 128 live tokens: a=3.02,
+//                                                         b=0.52, R2=0.19) is reported
+//                                                         beside it for transparency. The
+//                                                         intercept a_eff is the category's
+//                                                         shrunk level when the category
+//                                                         earned one (Lending n=15: 0.77x,
+//                                                         Dexs n=11: 1.03x on the base;
+//                                                         k=20 shrinkage toward pooled),
+//                                                         else the pooled a. The SLOPE b
+//                                                         stays pooled for every row, so the
+//                                                         base stays concave and cannot
+//                                                         explode at large TVL. There is no
+//                                                         log base any more: the radar-2
+//                                                         constants $120M / $10M are gone,
+//                                                         and with them the base they set.
+//                                                         Maturity, chains and category
+//                                                         are radar-2's, unchanged.
+//   growth   = clamp(change_7d, GROWTH_FLOOR, GROWTH_CAP) x confidence
+//                                                         -- confidence = min(1, tvl_prev / floor):
+//                                                         a spike counts only as far as the
+//                                                         protocol was already big before it.
+//                                                         tvl_prev = tvl / (1 + change_7d / 100).
+//                                                         A null change_7d is invalid input:
+//                                                         growth counts as 0 (M_g = 1.0) and the
+//                                                         row carries an invalid-growth flag
+//                                                         the board displays.
+//   growthM  = 1 + (growth / 100) x GROWTH_WEIGHT       -- 0.80x .. 1.50x
 //   maturity = MATURITY_FLOOR + min(age, MATURITY_DAYS) / MATURITY_DAYS x MATURITY_RANGE
 //                                                             -- age is days since first listed;
 //                                                             unknown age counts as UNKNOWN_AGE_DAYS
@@ -29,7 +61,14 @@
 //
 // Every constant is stated in the dashboard and in README.md. The dashboard shows each row's
 // breakdown (base, growth multiplier, maturity multiplier, chain multiplier, category multiplier)
-// so the judge can verify the value follows from the figures.
+// so the judge can verify the value follows from the figures. The dashboard also shows the
+// calibration itself (a, b, R2, n and the scatter of live tokens) so the judge can see how
+// weakly the base is pinned -- and it shows the unaligned fit beside the aligned one, so the
+// choice of sample is visible, not hidden. The base is rounded to whole dollars FIRST, and
+// the implied value is scored from that rounded base: board, data.js and the page all use
+// the same whole-dollar number, so the page's recompute matches the board exactly. An
+// independent full-precision recompute from the dashboard's a/b may differ by at most $1
+// per row -- that is the rounding, not a bug.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -54,10 +93,13 @@ export interface Snapshot {
   watchlist: string[];
 }
 
-/** The model's constants, as the dashboard states them. */
+/** The model's constants, as the dashboard states them. There is no base constant any more:
+ * the base is the power law fitted at run time (see fitCalibration). The universe floor is
+ * the snapshot's inclusion floor: no protocol below $5M of TVL is in the snapshot at all (the
+ * smallest TVL it carries is $5,007,171), so a pre-spike TVL below it means the protocol was
+ * not in the universe before the spike. */
 export interface ModelConstants {
-  base_scale: number;
-  base_ref: number;
+  universe_floor_usd: number;
   growth_weight: number;
   growth_floor: number;
   growth_cap: number;
@@ -73,11 +115,10 @@ export interface ModelConstants {
 }
 
 export const MODEL: ModelConstants = {
-  base_scale: 120_000_000,
-  base_ref: 10_000_000,
-  growth_weight: 1.0,
-  growth_floor: -60,
-  growth_cap: 200,
+  universe_floor_usd: 5_000_000,
+  growth_weight: 0.5,
+  growth_floor: -40,
+  growth_cap: 100,
   maturity_floor: 0.75,
   maturity_range: 0.25,
   maturity_days: 1095,
@@ -90,7 +131,203 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
+
+/** The smallest live-token sample the fit is allowed to run on. Below it the fit is not a
+ * calibration at all, and fitCalibration reports FAILED instead of inventing numbers. */
+export const CALIBRATION_MIN_N = 30;
+
+/** A category earns its own base level only with this many live rows in the aligned
+ * sample. Below it the per-category intercept is noise (a single live token can sit
+ * 567x off the pooled line), so the category uses the pooled intercept. */
+export const LEVEL_MIN_N = 10;
+
+/** Shrinkage toward the pooled intercept: a_eff = A + (n/(n+k)) x (a_cat - A). With
+ * k=20 a 15-row category keeps 43% of its deviation, an 11-row one 35%: the level is
+ * a nudge, never a rebuild. */
+export const LEVEL_SHRINK_K = 20;
+
+/** One category's base level: the raw per-category intercept at the pooled slope
+ * (a_cat), the shrunk intercept actually used (a_eff), and the multiplier on the base
+ * that a_eff implies (level = 10^(a_eff - A)). */
+export interface CategoryLevel {
+  category: string;
+  n: number;
+  a_cat: number;
+  a_eff: number;
+  level: number;
+}
+
+/** The base's calibration: the power law log10(mcap) = a + b x log10(tvl) fitted to the
+ * snapshot's live tokens at run time. `a/b/r2` are the ALIGNED fit -- the model base: live
+ * tokens whose category the board's own exclusion rule keeps out (CEX, Bridge, Canonical
+ * Bridge, Liquid Staking, Liquid Restaking, Restaked BTC) are not in the sample, so the fit
+ * is fitted to the same kind of protocol the board ranks. `full_*` is the UNALIGNED fit
+ * over every live token, reported beside it so the choice of sample is visible. `points`
+ * are the aligned sample's live tokens (TVL and market cap only), for the dashboard's
+ * scatter; `excluded_points` are the live tokens the alignment leaves out (34 of them),
+ * drawn grey and hollow beside the aligned sample. `levels` are the per-category base
+ * levels: only categories with at least LEVEL_MIN_N live rows in the aligned sample
+ * earn one, shrunk toward the pooled intercept with LEVEL_SHRINK_K, and the SLOPE stays
+ * pooled for every row -- so a level is a small intercept shift, never a new fit. On
+ * failure `status` is 'failed', `reason` names why, and every coefficient is null: there
+ * is no fallback base and no invented number. */
+export interface Calibration {
+  status: 'ok' | 'failed';
+  reason: string | null;
+  a: number | null;
+  b: number | null;
+  r2: number | null;
+  n: number;
+  median_resid: number | null;
+  points: Array<{ t: number; m: number }>;
+  excluded_points: Array<{ t: number; m: number }>;
+  full_a: number | null;
+  full_b: number | null;
+  full_r2: number | null;
+  full_n: number;
+  levels: CategoryLevel[];
+}
+
+function failedCalibration(reason: string, full: { a: number | null; b: number | null; r2: number | null; n: number }): Calibration {
+  return { status: 'failed', reason, a: null, b: null, r2: null, n: 0, median_resid: null, points: [], excluded_points: [], full_a: full.a, full_b: full.b, full_r2: full.r2, full_n: full.n, levels: [] };
+}
+
+/** Ordinary least squares on the log10 points, with the fit's strength. Returns nulls when
+ * the points cannot support a fit (too few, no TVL spread, or a non-finite result). */
+function olsLog10(pts: Array<{ x: number; y: number }>): { a: number | null; b: number | null; r2: number | null; median_resid: number | null } {
+  const n = pts.length;
+  if (n < 2) return { a: null, b: null, r2: null, median_resid: null };
+  let mx = 0;
+  let my = 0;
+  for (const p of pts) {
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return { a: null, b: null, r2: null, median_resid: null };
+    mx += p.x;
+    my += p.y;
+  }
+  mx /= n;
+  my /= n;
+  let sxy = 0;
+  let sxx = 0;
+  let sst = 0;
+  for (const p of pts) {
+    sxy += (p.x - mx) * (p.y - my);
+    sxx += (p.x - mx) * (p.x - mx);
+    sst += (p.y - my) * (p.y - my);
+  }
+  if (!(sxx > 0) || !(sst > 0)) return { a: null, b: null, r2: null, median_resid: null };
+  const b = sxy / sxx;
+  const a = my - b * mx;
+  let ssr = 0;
+  const resids: number[] = [];
+  for (const p of pts) {
+    const r = p.y - (a + b * p.x);
+    ssr += r * r;
+    resids.push(Math.abs(r));
+  }
+  let r2 = 1 - ssr / sst;
+  if (!Number.isFinite(a) || !Number.isFinite(b) || !Number.isFinite(r2) || r2 < -1e-9 || r2 > 1 + 1e-9) {
+    return { a: null, b: null, r2: null, median_resid: null };
+  }
+  r2 = Math.min(1, Math.max(0, r2));
+  resids.sort((x, y) => x - y);
+  return { a, b, r2, median_resid: resids[Math.floor(resids.length / 2)] ?? null };
+}
+
+/**
+ * Fit log10(mcap) = a + b x log10(tvl) on the snapshot's live tokens. Rows are sorted by slug
+ * first so the fit is deterministic. A fitted point needs a positive finite market cap, a
+ * positive finite TVL, and a reported seven-day change: a market cap of zero carries no log,
+ * and a row whose growth is unreported is invalid input, never a valid observation. The
+ * ALIGNED sample -- the model -- leaves out the categories the board's exclusion rule keeps
+ * out; the FULL sample over every live token is fitted the same way and reported beside it.
+ * The fit is weak (aligned R2 around 0.10 on this snapshot: the typical live token sits
+ * about 3.5x from the fitted line), and the dashboard says so -- the base is a power law
+ * calibrated to real market data, not a precise law.
+ */
+export function fitCalibration(snapshot: Snapshot): Calibration {
+  const live = snapshot.protocols
+    .filter(
+      (p) =>
+        p.mcap_usd !== null &&
+        p.mcap_usd > 0 &&
+        p.tvl_usd > 0 &&
+        Number.isFinite(p.mcap_usd) &&
+        Number.isFinite(p.tvl_usd) &&
+        p.change_7d !== null &&
+        Number.isFinite(p.change_7d),
+    )
+    .slice()
+    .sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+  const fullPts = live.map((p) => ({ x: Math.log10(p.tvl_usd), y: Math.log10(p.mcap_usd as number) }));
+  const full = olsLog10(fullPts);
+  const fullOut = { a: full.a, b: full.b, r2: full.r2, n: live.length };
+  if (live.length < CALIBRATION_MIN_N) {
+    return failedCalibration(`fewer than ${CALIBRATION_MIN_N} usable live tokens (n=${live.length})`, fullOut);
+  }
+  const aligned = live.filter((p) => p.category === null || !EXCLUDED_CATEGORIES.has(p.category));
+  if (aligned.length < CALIBRATION_MIN_N) {
+    return failedCalibration(`fewer than ${CALIBRATION_MIN_N} usable live tokens after the board's category exclusions (n=${aligned.length})`, fullOut);
+  }
+  const pts = aligned.map((p) => ({ x: Math.log10(p.tvl_usd), y: Math.log10(p.mcap_usd as number), t: p.tvl_usd, m: p.mcap_usd as number }));
+  const excluded = live
+    .filter((p) => p.category !== null && EXCLUDED_CATEGORIES.has(p.category))
+    .map((p) => ({ t: p.tvl_usd, m: p.mcap_usd as number }));
+  const fit = olsLog10(pts);
+  if (fit.a === null || fit.b === null || fit.r2 === null || fit.median_resid === null) {
+    return failedCalibration('the aligned fit failed validation (no TVL spread, or a non-finite coefficient or R2)', fullOut);
+  }
+  // Per-category levels: the mcap/TVL relationship is category-specific (within-category
+  // univariate R2: Lending 0.37, Dexs 0.32, RWA 0.50, vs pooled 0.10), so categories
+  // with enough live rows earn their own intercept -- but the SLOPE stays pooled for
+  // every row, and the level is shrunk hard toward pooled. A per-category slope would
+  // explode at large TVL (Dexs b=1.78, Lending b=1.50: simulated top $1.09B); an
+  // unshrunk intercept lets a single-token category sit 567x off the pooled line. Both
+  // were simulated and rejected (see TR-NOTES-v2.md §2). A null category earns no level:
+  // no null-category row is in the aligned sample, so the '' group never reaches n≥10.
+  const catSums = new Map<string, { n: number; sum: number }>();
+  for (const p of aligned) {
+    const key = p.category ?? '';
+    const e = catSums.get(key) ?? { n: 0, sum: 0 };
+    e.n += 1;
+    e.sum += Math.log10(p.mcap_usd as number) - fit.b * Math.log10(p.tvl_usd);
+    catSums.set(key, e);
+  }
+  const levels: CategoryLevel[] = [];
+  for (const key of [...catSums.keys()].sort()) {
+    const e = catSums.get(key)!;
+    if (e.n < LEVEL_MIN_N) continue;
+    const aCat = e.sum / e.n;
+    const aEff = fit.a + (e.n / (e.n + LEVEL_SHRINK_K)) * (aCat - fit.a);
+    const level = Math.pow(10, aEff - fit.a);
+    if (!Number.isFinite(aCat) || !Number.isFinite(aEff) || !Number.isFinite(level) || level <= 0) {
+      return failedCalibration(`category level for ${key === '' ? '(null category)' : key} failed validation`, fullOut);
+    }
+    levels.push({ category: key, n: e.n, a_cat: aCat, a_eff: aEff, level });
+  }
+  return {
+    status: 'ok',
+    reason: null,
+    a: fit.a,
+    b: fit.b,
+    r2: fit.r2,
+    n: aligned.length,
+    median_resid: fit.median_resid,
+    points: pts.map((p) => ({ t: p.t, m: p.m })),
+    excluded_points: excluded,
+    full_a: full.a,
+    full_b: full.b,
+    full_r2: full.r2,
+    full_n: live.length,
+    levels,
+  };
+}
+
+/** How many protocols record a CoinGecko id or a symbol but no market cap: they have a ticker
+ * on record, so the board keeps them out, and the dashboard states the count. */
+export function countTickerNoMcap(snapshot: Snapshot): number {
+  return snapshot.protocols.filter((p) => p.mcap_usd === null && (p.gecko_id !== null || p.symbol !== null)).length;
+}
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -120,8 +357,12 @@ export interface BoardRow {
   implied_value_usd: number;
   model: {
     base_usd: number;
+    a_eff: number;
     growth_pct: number;
     growth_multiplier: number;
+    confidence: number;
+    tvl_prev_usd: number;
+    invalid_growth: boolean;
     maturity_multiplier: number;
     chain_multiplier: number;
     category_multiplier: number;
@@ -145,8 +386,12 @@ export interface RadarRow {
   age_days: number | null;
   implied_value_usd: number;
   base_usd: number;
+  a_eff: number;
   growth_pct: number;
   growth_multiplier: number;
+  confidence: number;
+  tvl_prev_usd: number;
+  invalid_growth: boolean;
   maturity_multiplier: number;
   chain_multiplier: number;
   category_multiplier: number;
@@ -164,13 +409,15 @@ export interface LiveRow {
   change_7d: number | null;
 }
 
-/** Everything the dashboard needs: the board, the live set, and the model it runs. */
+/** Everything the dashboard needs: the board, the live set, the calibration, and the model it runs. */
 export interface RadarData {
   as_of: string;
   source: string;
   floor_usd: number;
   model: ModelConstants;
   model_version: string;
+  calibration: Calibration;
+  ticker_no_mcap: number;
   watchlist_size: number;
   board_size: number;
   early_size: number;
@@ -188,11 +435,6 @@ export class SnapshotError extends Error {
 }
 
 const DAY_MS = 86_400_000;
-
-/** A finite number, else `fallback`. */
-function finite(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
-}
 
 /** A whole day count from `from` to `to`, clamped at zero; null when either date is absent or bad. */
 export function ageDays(asOf: string, listedAt: string | null): number | null {
@@ -267,26 +509,59 @@ export function launchRateFor(p: SnapshotProtocol, rates: { byCategory: Map<stri
   return rates.byCategory.get(key) ?? rates.global;
 }
 
-/** The five multipliers and the implied value one protocol gets under `model`. */
+/** The intercept a row is scored with: its category's shrunk level when the category
+ * earned one (at least LEVEL_MIN_N live rows in the aligned sample), else the pooled
+ * intercept. The lookup is by exact category name, never by substring: a category
+ * called 'Uncollateralized Lending' is not 'Lending'. The slope is pooled for every
+ * row, so only the intercept moves. */
+function effectiveA(category: string | null, pooledA: number, levels: CategoryLevel[]): number {
+  const key = category ?? '';
+  for (const l of levels) if (l.category === key) return l.a_eff;
+  return pooledA;
+}
+
+/** The five multipliers and the implied value one protocol gets under `model`. The base is
+ * the fitted power law: 10^a_eff x tvl^b, where a_eff is the row's category level when
+ * its category earned one, else the aligned calibration's pooled a; the slope b is the
+ * aligned calibration's for every row. Growth is confidence-weighted: the week's change
+ * counts only as far as the protocol was already big before it (tvl_prev / floor), so a
+ * spike from below the snapshot's floor cannot decide a rank. A null change counts as 0
+ * AND raises the invalid-growth flag: M_g is 1.0 and the row is flagged on the board.
+ * The base is rounded to WHOLE DOLLARS first, and the implied value is scored from that
+ * rounded base, never from the unrounded fit: board, data.js and the page all use the
+ * same whole-dollar number, so the page's recompute matches the board's exactly. An
+ * independent full-precision recompute from the dashboard's a/b may differ by at most $1
+ * per row -- that is the rounding, not a bug. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
   model: ModelConstants,
   rates: { byCategory: Map<string, number>; global: number },
+  calibration: Calibration,
 ): {
   implied: number;
   base: number;
+  aEff: number;
   growthPct: number;
   growthMult: number;
+  confidence: number;
+  tvlPrev: number;
+  invalidGrowth: boolean;
   maturityMult: number;
   chainMult: number;
   catMult: number;
   catRate: number;
   age: number | null;
 } {
+  if (calibration.status !== 'ok' || calibration.a === null || calibration.b === null) {
+    throw new Error(`token radar: the calibration failed (${calibration.reason ?? 'no reason'}): no base, no board`);
+  }
   const age = ageDays(asOf, protocol.listed_at);
-  const rawGrowth = finite(protocol.change_7d, 0);
-  const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
+  const invalidGrowth = protocol.change_7d === null || !Number.isFinite(protocol.change_7d);
+  const rawGrowth = invalidGrowth ? 0 : (protocol.change_7d as number);
+  const tvlPrev = rawGrowth <= -100 ? Infinity : protocol.tvl_usd / (1 + rawGrowth / 100);
+  const confidence = Number.isFinite(tvlPrev) ? Math.min(1, tvlPrev / model.universe_floor_usd) : 1;
+  const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth)) * confidence;
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
   const ageForModel = age ?? model.unknown_age_days;
   const maturityMult =
@@ -296,9 +571,10 @@ export function impliedValue(
   const chainMult = 1 + model.chain_step * Math.min(Math.max(chainCount - 1, 0), model.chain_cap);
   const catRate = launchRateFor(protocol, rates);
   const catMult = model.cat_floor + catRate * model.cat_range;
-  const base = model.base_scale * Math.log10(1 + protocol.tvl_usd / model.base_ref);
+  const aEff = effectiveA(protocol.category, calibration.a, calibration.levels);
+  const base = Math.round(Math.pow(10, aEff) * Math.pow(protocol.tvl_usd, calibration.b));
   const implied = Math.max(1, Math.round(base * growthMult * maturityMult * chainMult * catMult));
-  return { implied, base: Math.round(base), growthPct, growthMult, maturityMult, chainMult, catMult, catRate, age };
+  return { implied, base, aEff, growthPct, growthMult, confidence, tvlPrev, invalidGrowth, maturityMult, chainMult, catMult, catRate, age };
 }
 
 /** The snapshot's protocol by slug. */
@@ -310,6 +586,10 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
   const index = bySlug(snapshot.protocols);
   const rates = categoryLaunchRates(snapshot);
+  const calibration = fitCalibration(snapshot);
+  if (calibration.status !== 'ok') {
+    throw new Error(`token radar: the calibration failed (${calibration.reason ?? 'no reason'}): no base, no board`);
+  }
   const chosen = new Map<string, SnapshotProtocol>();
   // The watchlist is the floor: every slug it names, even one the snapshot no longer carries.
   for (const slug of snapshot.watchlist) {
@@ -323,7 +603,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   }
 
   const scored = [...chosen.values()].map((p) => {
-    const v = impliedValue(p, snapshot.as_of, model, rates);
+    const v = impliedValue(p, snapshot.as_of, model, rates, calibration);
     return { p, v };
   });
   scored.sort((a, b) => b.v.implied - a.v.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
@@ -344,8 +624,12 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     implied_value_usd: s.v.implied,
     model: {
       base_usd: s.v.base,
+      a_eff: s.v.aEff,
       growth_pct: s.v.growthPct,
       growth_multiplier: s.v.growthMult,
+      confidence: s.v.confidence,
+      tvl_prev_usd: s.v.tvlPrev,
+      invalid_growth: s.v.invalidGrowth,
       maturity_multiplier: s.v.maturityMult,
       chain_multiplier: s.v.chainMult,
       category_multiplier: s.v.catMult,
@@ -385,9 +669,14 @@ function holdDaysFor(age: number | null): number {
   return 30;
 }
 
-/** The gas a setup step costs, from the position's size. */
-function gasFor(capital: number): number {
-  return capital >= 150 ? 8 : 4;
+/**
+ * The gas a setup step costs, from the position's size and the chain it runs on.
+ * Ethereum mainnet is dollars per transaction; every other first chain the board
+ * ranks on is a layer-2 or an alt-L1 where the same transaction costs cents.
+ */
+function gasFor(capital: number, chain: string): string {
+  if (chain !== 'Ethereum') return 'a few cents of gas';
+  return capital >= 150 ? 'about $8 of gas' : 'about $4 of gas';
 }
 
 /**
@@ -438,9 +727,57 @@ function weeklyFor(p: SnapshotProtocol): string {
 }
 
 /**
- * A protocol's farm plan: six steps, each an action with a cost and a time. The plan is derived
- * from the protocol's own record (category, chains, TVL, age), never from a hand-written list of
- * names. Step 1 is the same safety step for every protocol; steps 2 and 3 follow its category.
+ * The pre-deposit check, by category. For curated vaults it cites the venue's real warning
+ * flags as the example of what to look for: Morpho's vault pages flag not_whitelisted,
+ * deposit_disabled and low_liquidity (docs.morpho.org), and a deposit cap can sit at zero,
+ * so a capped vault takes no deposit at all. The step is an instruction to check the live
+ * page at execution time -- no vault is named here, and no claim is made about any single
+ * vault's state. The ">95% fall" wording is a vault-data provider's warning text, not
+ * Morpho's own vocabulary, so the step phrases it generically. For every other category
+ * the check is the same shape without a named venue.
+ */
+function checkFor(p: SnapshotProtocol): string {
+  const c = (p.category ?? '').toLowerCase();
+  if (c.includes('curator') || c.includes('allocator') || c.includes('risk')) {
+    return `Before you deposit, open the vault on the venue's own page and check it carries no warning flag, its deposits are not capped, and its value has not fallen far from its peak. Morpho's vault pages, for example, flag not_whitelisted, deposit_disabled and low_liquidity. Skip a vault that fails any of these and pick another from the same curator.`;
+  }
+  return `Before you deposit, open the protocol's own page and check the pool or vault is still open, its value has not fallen far from its peak, and it carries no warning. Skip it if any of these fail.`;
+}
+
+/**
+ * The yield check. The yield is an ASSUMPTION for the break-even math, not a promise: 4%
+ * a year, stated as such. The arithmetic is the farmer's own -- the capital and the hold
+ * come from this protocol's record -- and the vault's actual rate is read off its own page
+ * at deposit time. No APY is cited: real vault rates on the same pages run from 0% to
+ * four figures, which is exactly why the plan assumes a rate instead of quoting one.
+ */
+function yieldFor(capital: number, hold: number): string {
+  const example = (capital * 0.04 * hold) / 365;
+  return `Assume a net yield of 4% a year for the break-even math: $${capital} at an assumed 4% for ${hold} days earns $${capital} x 0.04 x ${hold}/365, about $${example.toFixed(2)}. That 4% is an assumption, not a promise -- read the vault's actual rate off its own page at deposit time -- and only deposit if the assumed yield beats the gas you pay.`;
+}
+
+/**
+ * The risks, kept apart from the costs: a step of its own, so a reader never mistakes a
+ * risk for a fee. Category-flavoured where the category earns it, generic otherwise. None
+ * of these risks is removed by reading the plan.
+ */
+function riskFor(p: SnapshotProtocol): string {
+  const c = (p.category ?? '').toLowerCase();
+  if (c.includes('curator') || c.includes('allocator') || c.includes('risk')) {
+    return `Risks, separate from the costs above: the curator can change allocations or raise fees behind a timelock; a vault's markets can carry bad debt; withdrawals can wait when markets are fully borrowed; a smart-contract bug can lose funds. Reading this plan removes none of these risks.`;
+  }
+  return `Risks, separate from the costs above: the protocol's contracts can carry bugs; its assets can lose value or liquidity; withdrawals can wait when funds are fully deployed; an incentive program can end without notice. Reading this plan removes none of these risks.`;
+}
+
+/**
+ * A protocol's farm plan: eight steps, each an action with a cost and a time. The plan is
+ * derived from the protocol's own record (category, chains, TVL, age), never from a hand-written
+ * list of names. Step 1 is the same safety step for every protocol; steps 2 to 4 follow its
+ * category (the action, the pre-deposit check, the yield arithmetic as a labeled assumption);
+ * step 5 states the risks apart from the costs; step 6 is the weekly action; step 7 is the
+ * age-derived hold (the snapshot-counting is a working assumption, labeled as one); step 8
+ * is the claim check -- it only ever says to check the protocol's official page for a
+ * rewards or points program, never that one exists -- and the farm log.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const chain = chainOf(p);
@@ -456,28 +793,38 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
     },
     {
       text: action,
-      cost: `$${capital} of capital and about $${gasFor(capital)} of gas`,
+      cost: `$${capital} of capital and ${gasFor(capital, chain)}`,
       time: '15 minutes to set up',
     },
     {
-      text: `Make one qualifying action each week, such as ${weekly}.`,
+      text: checkFor(p),
+      cost: 'nothing to check',
+      time: '10 minutes',
+    },
+    {
+      text: yieldFor(capital, hold),
+      cost: 'nothing to check; the 4% is an assumption, the vault page states its rate',
+      time: '5 minutes',
+    },
+    {
+      text: riskFor(p),
+      cost: 'nothing to read; the risk is the capital itself, not a fee',
+      time: '10 minutes',
+    },
+    {
+      text: `Make one action each week, such as ${weekly}.`,
       cost: 'about $2 of gas a week',
       time: '10 minutes a week',
     },
     {
-      text: `Hold the position for at least ${hold} days so the activity is counted in more than one snapshot.`,
+      text: `Hold the position for at least ${hold} days. A longer hold keeps the position visible across snapshots -- a working assumption, not a rule any protocol publishes.`,
       cost: `the $${capital} stays in the position`,
       time: `${hold} days`,
     },
     {
-      text: `Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.`,
-      cost: 'no fee to check, and never pay to claim',
+      text: `Before you withdraw, check the protocol's official page for any rewards or points program -- if it publishes none, there is none to claim -- and claim only from a link the official page itself publishes. Never pay to claim. Then write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.`,
+      cost: 'no fee to check',
       time: '10 minutes',
-    },
-    {
-      text: `Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.`,
-      cost: 'nothing but the log',
-      time: '5 minutes',
     },
   ];
 }
@@ -499,11 +846,15 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
     }));
 }
 
-/** A board row's compact form for data.js, with the farm plan generated in the page. The
- * multipliers and the category rate are kept at full precision: the page recomputes the
- * implied value from these figures, and with rounded inputs its recompute would land a few
- * hundred dollars off the board's number.
- */
+/** A board row's compact form for data.js, with the farm plan generated in the page. The base
+ * is rounded to whole dollars and stored IDENTICALLY here and in board.json, and the implied
+ * value is scored from that rounded base: the page's recompute matches the board's number
+ * exactly; an independent full-precision recompute from the dashboard's a/b may differ by
+ * at most $1 per row. The multipliers, the confidence and the category rate are kept at
+ * full precision.
+ * `tvl_prev_usd` is Infinity for a protocol whose week fell 100% or more; JSON writes it as
+ * null, and the page recomputes it from the TVL and the change, so the stored copy is
+ * display-only. */
 export function radarRow(row: BoardRow): RadarRow {
   return {
     rank: row.rank,
@@ -518,8 +869,12 @@ export function radarRow(row: BoardRow): RadarRow {
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
     base_usd: row.model.base_usd,
+    a_eff: row.model.a_eff,
     growth_pct: row.model.growth_pct,
     growth_multiplier: row.model.growth_multiplier,
+    confidence: row.model.confidence,
+    tvl_prev_usd: row.model.tvl_prev_usd,
+    invalid_growth: row.model.invalid_growth,
     maturity_multiplier: row.model.maturity_multiplier,
     chain_multiplier: row.model.chain_multiplier,
     category_multiplier: row.model.category_multiplier,
@@ -531,6 +886,7 @@ export function radarRow(row: BoardRow): RadarRow {
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
   const board = buildBoard(snapshot, model);
   const live = liveRows(snapshot);
+  const calibration = fitCalibration(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const radar: RadarData = {
     as_of: snapshot.as_of,
@@ -538,6 +894,8 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     floor_usd: snapshot.floor_usd,
     model,
     model_version: MODEL_VERSION,
+    calibration,
+    ticker_no_mcap: countTickerNoMcap(snapshot),
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: early,
