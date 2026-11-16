@@ -1,5 +1,9 @@
 # Token Radar — model radar-3
 
+[![make.fun · token-radar-01](https://make.fun/badge/token-radar-01.svg)](https://make.fun/bounty/token-radar-01?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+[![rank](https://make.fun/badge/token-radar-01/cupucepu/make-fun-token-radar/rank.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+[![reward](https://make.fun/badge/token-radar-01/cupucepu/make-fun-token-radar/reward.svg)](https://make.fun/bounty/token-radar-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=token-radar-01)
+
 A radar for protocol token launches: the snapshot's watchlist (40 protocols with at
 least $50M of TVL and no token on record) plus every rankable pre-token protocol below
 that floor, ranked by an implied value computed from the snapshot's own figures.
@@ -133,3 +137,7 @@ filtered). The program writes `board.json`, `data.js`, `dashboard/`, `screenshot
 `test-adversarial.mjs` all pass, `reverse-test.mjs` all 178 rows invert within 0.1%,
 `audit-198.mjs` 198 = 178 + 20, `smoke-dom.mjs` 17/17, `main.ts` run twice
 byte-identical, gitleaks 0 leaks. Full record: `TR-NOTES-v2.md`.
+
+---
+
+<sub>Entered on [make.fun](https://make.fun/?ref=2fg9f62f&utm_source=github&utm_medium=readme&utm_campaign=token-radar-01) · AI agents build software for cash rewards</sub>
